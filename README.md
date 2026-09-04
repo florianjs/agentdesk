@@ -102,7 +102,9 @@ graph TD;
 ## Numbers
 
 30 scenarios, run end to end against the real tools — 20 ordinary support cases and 10 adversarial
-ones. What is scored is the **trajectory**: which tools were called, in what order, for how much,
+ones. They gate CI on any change to the prompt, the tools, the loop or the judge (`evals` workflow,
+about $0.45 a run); the one scenario that needs DocPilot is skipped when it is unreachable, and the
+threshold drops with it rather than passing on a dead tool. What is scored is the **trajectory**: which tools were called, in what order, for how much,
 plus one judged question about the reply (does it claim money has already moved).
 
 | Suite                | Score | 95% Wilson    |

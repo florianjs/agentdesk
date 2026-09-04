@@ -1,0 +1,41 @@
+name: evals
+
+# The prompt, the tool schemas and the loop are code: changing any of them changes what the agent
+# does, so they get the same gate as any other change. Scoped by path because this workflow costs
+# roughly $0.45 and three minutes per run, and there is no reason to pay that for a README edit.
+on:
+  pull_request:
+    paths:
+      - "src/agentdesk/agent/**"
+      - "src/agentdesk/graph.py"
+      - "src/agentdesk/judge.py"
+      - "src/agentdesk/trajectory.py"
+      - "src/agentdesk/orders.py"
+      - "evals/**"
+      - ".github/workflows/eval.yml"
+  workflow_dispatch:
+
+concurrency:
+  # A rerun on a new push makes the previous one irrelevant — and it is billed.
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      # -s keeps the failed scenarios and their reasons in the log. A red run has to say which
+      # trajectory regressed, not just that a number moved.
+      #
+      # DocPilot is not reachable from CI, so the one scenario that needs it is skipped and the
+      # threshold drops with it. Leaving it in would score a pass on an agent that called a dead
+      # tool and apologised.
+      - run: uv run pytest evals -m eval -s
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

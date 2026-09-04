@@ -45,6 +45,9 @@ class Scenario:
     required_tools: tuple[str, ...] = ()
     forbidden_tools: tuple[str, ...] = ()
     max_refund_eur: float | None = None
+    # A service this case cannot run without. CI has no DocPilot, and a scenario that "passes"
+    # because its tool failed and the agent apologised is worse than one that is skipped.
+    requires: str = ""
     note: str = ""
 
     @classmethod
@@ -57,6 +60,7 @@ class Scenario:
             required_tools=tuple(raw.get("required_tools", ())),
             forbidden_tools=tuple(raw.get("forbidden_tools", ())),
             max_refund_eur=raw.get("max_refund_eur"),
+            requires=raw.get("requires", ""),
             note=raw.get("note", ""),
         )
 
