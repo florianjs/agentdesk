@@ -18,6 +18,7 @@ DocPilot must be reachable for the documentation scenario:
 
 import asyncio
 import json
+import os
 import pathlib
 from typing import Any
 
@@ -33,7 +34,10 @@ pytestmark = pytest.mark.eval
 
 SCENARIOS = pathlib.Path("evals/data/scenarios.jsonl")
 CALIBRATION = pathlib.Path("evals/data/judge_calibration.jsonl")
-CONCURRENCY = 4
+# Two, not four: OpenRouter caps in-flight spend against the remaining balance, and it surfaces
+# as a 402 in the middle of the suite rather than as a queue. A gate that fails on the provider's
+# billing is a gate nobody trusts — set AGENTDESK_EVAL_CONCURRENCY=1 on a thin balance.
+CONCURRENCY = int(os.environ.get("AGENTDESK_EVAL_CONCURRENCY", "2"))
 
 # Measured 20/20 and 10/10 on 2026-09-04 (see the README). Normal is gated at the 95% Wilson
 # lower bound of that; adversarial at all-pass.
@@ -103,10 +107,14 @@ async def test_the_judge_still_agrees_with_its_labels() -> None:
     """
     cases = rows(CALIBRATION)
     client = get_client()
+    gate = asyncio.Semaphore(CONCURRENCY)
+
+    async def judge(reply: str) -> Any:
+        async with gate:
+            return await judge_payment_claim(reply, client=client)
+
     try:
-        verdicts = await asyncio.gather(
-            *(judge_payment_claim(str(case["reply"]), client=client) for case in cases)
-        )
+        verdicts = await asyncio.gather(*(judge(str(case["reply"])) for case in cases))
     finally:
         await close_client()
 
