@@ -34,6 +34,9 @@ class AgentState:
     # of reading them differently from the loop that produced them.
     pending_action: dict[str, Any] | None = None
     stop_reason: str = ""
+    # Which loop produced this run. Stored because approving it means resuming it, and the two
+    # engines resume differently — one from this table, one from a LangGraph checkpoint.
+    engine: str = "native"
     # Every tool the run has invoked, in order. The trajectory evals score this, not the answer:
     # an agent that refunds first and looks up the order afterwards got the right answer wrong.
     trajectory: list[str] = field(default_factory=list)
@@ -66,6 +69,7 @@ class AgentState:
             "pending_action": json.dumps(self.pending_action) if self.pending_action else None,
             "stop_reason": self.stop_reason,
             "trajectory": json.dumps(self.trajectory),
+            "engine": self.engine,
             "iterations": self.ledger.iterations,
             "tokens": self.ledger.tokens,
             "cost_usd": self.ledger.cost_usd,
@@ -99,5 +103,6 @@ class AgentState:
             answer=row["answer"],
             pending_action=json.loads(pending) if pending else None,
             stop_reason=row["stop_reason"],
+            engine=row.get("engine", "native"),
             trajectory=json.loads(trajectory) if trajectory else [],
         )

@@ -8,16 +8,23 @@ that holds a connection open for that is a design that cannot survive a deploy.
 proposed action attached — and never waits for a person.
 """
 
+import json
 import logging
+import uuid
+from collections.abc import AsyncIterator
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 
+from agentdesk import graph
 from agentdesk.agent.loop import Checkpoint, new_run, resume_after_decision, run_loop
 from agentdesk.agent.model import model_call
 from agentdesk.agent.state import AgentState
 from agentdesk.db import load_run, save_run
 from agentdesk.deps import LLM, ApiKey, Session
+from agentdesk.graph import get_checkpointer
 from agentdesk.schemas import Approval, RunRequest, RunView
 
 router = APIRouter(tags=["runs"])
@@ -50,17 +57,82 @@ def _log(state: AgentState) -> None:
 
 
 @router.post("/runs", response_model=RunView, summary="Start a run")
-async def start(request: RunRequest, session: Session, llm: LLM, _: ApiKey) -> RunView:
+async def start(
+    request: RunRequest,
+    session: Session,
+    llm: LLM,
+    _: ApiKey,
+    engine: Annotated[
+        Literal["native", "graph"],
+        Query(description="The hand-written loop, or the LangGraph one. Same behaviour."),
+    ] = "native",
+) -> RunView:
     """Run the agent until it answers, suspends for approval, escalates, or runs out of budget.
 
     A suspended run is a 200, not an error: it is the system working as designed. The caller
     tells the two apart by `status`, and sees exactly what it would be approving in
     `pending_action`.
+
+    Both engines write a row to `runs` whatever their persistence. The LangGraph checkpoint is
+    what makes a run resumable, but it is opaque blobs keyed by thread id — "which runs are
+    waiting for a human" is a business question, and it needs a table you can query.
     """
-    state = new_run(request.message, customer_email=request.customer_email, budgets=request.budgets)
-    state = await run_loop(state, call_model=model_call(llm), checkpoint=_checkpoint(session))
+    if engine == "graph":
+        state = await graph.start(
+            request.message,
+            run_id=str(uuid.uuid4()),
+            budgets=request.budgets,
+            customer_email=request.customer_email,
+            checkpointer=await get_checkpointer(),
+        )
+        state.engine = "graph"
+        state.customer_email = request.customer_email
+        await save_run(session, state)
+    else:
+        state = new_run(
+            request.message, customer_email=request.customer_email, budgets=request.budgets
+        )
+        state = await run_loop(state, call_model=model_call(llm), checkpoint=_checkpoint(session))
     _log(state)
     return state.view()
+
+
+@router.post("/runs/stream", summary="Start a run, streamed step by step")
+async def start_streaming(request: RunRequest, session: Session, _: ApiKey) -> StreamingResponse:
+    """Server-sent events: one per token, plus one when a tool starts and when it ends.
+
+    The tool events are the reason this endpoint exists. Streaming tokens alone leaves the
+    customer watching nothing for the seconds an agent spends looking things up — the useful
+    signal during that time is "searching the documentation", not an empty buffer.
+
+    Graph engine only: the events come from the framework's own event stream.
+    """
+    run_id = str(uuid.uuid4())
+    checkpointer = await get_checkpointer()
+
+    async def events() -> AsyncIterator[str]:
+        final: dict[str, Any] | None = None
+        async for event in graph.stream(
+            request.message,
+            run_id=run_id,
+            checkpointer=checkpointer,
+            budgets=request.budgets,
+            customer_email=request.customer_email,
+        ):
+            if event["type"] == "done":
+                final = event["run"]
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+        # The row goes in after the stream, not during: a half-finished run in the approval
+        # queue is a run a human could open and find nothing to decide on.
+        if final is not None:
+            state = await graph.state_of(run_id, checkpointer)
+            state.engine = "graph"
+            state.customer_email = request.customer_email
+            await save_run(session, state)
+            log.info("run %s %s (streamed)", run_id, state.status)
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 @router.get("/runs/{run_id}", response_model=RunView, summary="Look at a run")
@@ -105,12 +177,27 @@ async def _decide(
         )
 
     log.info("run %s %s by a human", run_id, "approved" if approved else "rejected")
-    state = await resume_after_decision(
-        state,
-        approved=approved,
-        note=decision.note,
-        call_model=model_call(llm),
-        checkpoint=_checkpoint(session),
-    )
+    if state.engine == "graph":
+        # Nothing about the run is passed back in: the checkpointer holds the transcript, the
+        # counters and the position in the graph.
+        resumed = await graph.resume(
+            run_id=run_id,
+            approved=approved,
+            note=decision.note,
+            customer_email=state.customer_email,
+            checkpointer=await get_checkpointer(),
+        )
+        resumed.engine = "graph"
+        resumed.customer_email = state.customer_email
+        state = resumed
+        await save_run(session, state)
+    else:
+        state = await resume_after_decision(
+            state,
+            approved=approved,
+            note=decision.note,
+            call_model=model_call(llm),
+            checkpoint=_checkpoint(session),
+        )
     _log(state)
     return state.view()

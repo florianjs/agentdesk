@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS runs (
     pending_action  jsonb,
     stop_reason     text NOT NULL DEFAULT '',
     trajectory      jsonb NOT NULL DEFAULT '[]'::jsonb,
+    engine          text NOT NULL DEFAULT 'native',
     budgets         jsonb NOT NULL,
     iterations      int NOT NULL DEFAULT 0,
     tokens          int NOT NULL DEFAULT 0,
@@ -57,9 +58,10 @@ CREATE INDEX IF NOT EXISTS runs_awaiting_idx ON runs (created_at)
 # have to know whether it is the first one.
 UPSERT = """
 INSERT INTO runs (id, status, customer_email, messages, answer, pending_action, stop_reason,
-                  trajectory, budgets, iterations, tokens, cost_usd, cost_is_partial, elapsed_s)
+                  trajectory, engine, budgets, iterations, tokens, cost_usd, cost_is_partial,
+                  elapsed_s)
 VALUES (:id, :status, :customer_email, CAST(:messages AS jsonb), :answer,
-        CAST(:pending_action AS jsonb), :stop_reason, CAST(:trajectory AS jsonb),
+        CAST(:pending_action AS jsonb), :stop_reason, CAST(:trajectory AS jsonb), :engine,
         CAST(:budgets AS jsonb), :iterations, :tokens, :cost_usd, :cost_is_partial, :elapsed_s)
 ON CONFLICT (id) DO UPDATE SET
     status = EXCLUDED.status,
@@ -68,6 +70,7 @@ ON CONFLICT (id) DO UPDATE SET
     pending_action = EXCLUDED.pending_action,
     stop_reason = EXCLUDED.stop_reason,
     trajectory = EXCLUDED.trajectory,
+    engine = EXCLUDED.engine,
     iterations = EXCLUDED.iterations,
     tokens = EXCLUDED.tokens,
     cost_usd = EXCLUDED.cost_usd,
@@ -82,7 +85,7 @@ ON CONFLICT (id) DO UPDATE SET
 SELECT_RUN = """
 SELECT id, status, customer_email, messages::text AS messages, answer,
        pending_action::text AS pending_action, stop_reason, trajectory::text AS trajectory,
-       budgets::text AS budgets, iterations, tokens, cost_usd, cost_is_partial
+       engine, budgets::text AS budgets, iterations, tokens, cost_usd, cost_is_partial
 FROM runs WHERE id = :id
 """
 

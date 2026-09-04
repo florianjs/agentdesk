@@ -22,6 +22,7 @@ tested against synthetic runs, without a network.
 
 import json
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -133,20 +134,33 @@ class Outcome:
     elapsed_s: float
 
 
-async def evaluate(scenario: Scenario, client: AsyncOpenAI, *, prompt: str = CURRENT) -> Outcome:
+async def evaluate(
+    scenario: Scenario,
+    client: AsyncOpenAI,
+    *,
+    prompt: str = CURRENT,
+    engine: str = "native",
+) -> Outcome:
     """Run one scenario against the real agent and grade it.
 
     `prompt` is a parameter so the same suite can be run against a deliberately weak agent. A
     suite nothing fails measures nothing, and that control is the only way to find out which of
     the two this one is.
+
+    `engine` selects the hand-written loop or the LangGraph one. Both are scored by this same
+    function on purpose: a migration validated by a different eval is validated by nothing.
     """
     from agentdesk.agent.model import model_call
 
-    state = new_run(scenario.message)
-    state.messages[0]["content"] = prompt
-
     started = time.perf_counter()
-    state = await run_loop(state, call_model=model_call(client))
+    if engine == "graph":
+        from agentdesk import graph
+
+        state = await graph.start(scenario.message, run_id=uuid.uuid4().hex, prompt=prompt)
+    else:
+        state = new_run(scenario.message)
+        state.messages[0]["content"] = prompt
+        state = await run_loop(state, call_model=model_call(client))
     elapsed = time.perf_counter() - started
 
     claim = None

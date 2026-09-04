@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 from agentdesk.config import settings
 from agentdesk.db import create_schema, dispose_engine
+from agentdesk.graph import close_checkpointer
 from agentdesk.llm.client import MissingCredentials, close_client
 from agentdesk.routes import runs
 
@@ -38,6 +39,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
     # Connection pools outlive the process unless closed here.
     await close_client()
+    await close_checkpointer()
     await dispose_engine()
 
 

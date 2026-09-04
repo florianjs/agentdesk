@@ -28,9 +28,11 @@ from agentdesk.trajectory import Outcome, Scenario, evaluate
 
 SCENARIOS = pathlib.Path("evals/data/scenarios.jsonl")
 RESULTS = pathlib.Path("evals/results/trajectories.json")
+RESULTS_GRAPH = pathlib.Path("evals/results/trajectories-graph.json")
 
 # Four at a time. Higher and the rate limiter, not the agent, decides what the latency numbers
-# say.
+# say — and OpenRouter caps in-flight spend per account, which surfaces as a 402 mid-suite
+# rather than as a queue.
 CONCURRENCY = 4
 
 
@@ -44,9 +46,9 @@ def load(kind: str | None, only: str | None) -> list[Scenario]:
     return scenarios
 
 
-async def run_one(scenario: Scenario, gate: asyncio.Semaphore, prompt: str) -> Outcome:
+async def run_one(scenario: Scenario, gate: asyncio.Semaphore, prompt: str, engine: str) -> Outcome:
     async with gate:
-        return await evaluate(scenario, get_client(), prompt=prompt)
+        return await evaluate(scenario, get_client(), prompt=prompt, engine=engine)
 
 
 def report(results: list[Outcome]) -> dict[str, Any]:
@@ -98,16 +100,18 @@ def report(results: list[Outcome]) -> dict[str, Any]:
     return summary
 
 
-def write_results(summary: dict[str, Any], results: list[Outcome]) -> None:
+def write_results(summary: dict[str, Any], results: list[Outcome], engine: str) -> None:
     """The full transcript of every run, kept as an artefact.
 
     A score with no runs behind it cannot be argued with — and the answers are where the next
     prompt change starts.
     """
-    RESULTS.parent.mkdir(parents=True, exist_ok=True)
-    RESULTS.write_text(
+    path = RESULTS_GRAPH if engine == "graph" else RESULTS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         json.dumps(
             {
+                "engine": engine,
                 "summary": summary,
                 "runs": [
                     {
@@ -127,10 +131,17 @@ def write_results(summary: dict[str, Any], results: list[Outcome]) -> None:
         + "\n",
         encoding="utf-8",
     )
-    print(f"\nwritten to {RESULTS}")
+    print(f"\nwritten to {path}")
 
 
-async def main(kind: str | None, only: str | None, save: bool, control: bool) -> None:
+async def main(
+    kind: str | None,
+    only: str | None,
+    save: bool,
+    control: bool,
+    engine: str,
+    concurrency: int,
+) -> None:
     scenarios = load(kind, only)
     prompt = CONTROL_WEAK if control else CURRENT
     print(
@@ -139,16 +150,18 @@ async def main(kind: str | None, only: str | None, save: bool, control: bool) ->
         + "\n"
     )
 
-    gate = asyncio.Semaphore(CONCURRENCY)
+    gate = asyncio.Semaphore(concurrency)
     try:
-        results = await asyncio.gather(*(run_one(scenario, gate, prompt) for scenario in scenarios))
+        results = await asyncio.gather(
+            *(run_one(scenario, gate, prompt, engine) for scenario in scenarios)
+        )
     finally:
         await close_client()
 
     summary = report(list(results))
 
     if save:
-        write_results(summary, list(results))
+        write_results(summary, list(results), engine)
 
 
 if __name__ == "__main__":
@@ -156,6 +169,12 @@ if __name__ == "__main__":
     parser.add_argument("--kind", choices=["normal", "adversarial"])
     parser.add_argument("--only", help="a single scenario id")
     parser.add_argument("--no-save", action="store_true")
+    parser.add_argument(
+        "--engine", choices=["native", "graph"], default="native", help="which loop to score"
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=CONCURRENCY, help="runs in flight at once"
+    )
     parser.add_argument(
         "--control",
         action="store_true",
@@ -168,5 +187,7 @@ if __name__ == "__main__":
             arguments.only,
             not arguments.no_save and not arguments.control,
             arguments.control,
+            arguments.engine,
+            arguments.concurrency,
         )
     )

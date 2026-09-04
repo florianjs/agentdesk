@@ -9,7 +9,7 @@ knowledge) — and the whole suite is also exposed as an **MCP server**, drivabl
 
 ## Status
 
-🔧 In progress — v1 ships when the state graph and the MCP server land.
+🔧 In progress — v1 ships when the MCP server lands.
 
 | Area                                                             | Status |
 | ---------------------------------------------------------------- | ------ |
@@ -19,7 +19,7 @@ knowledge) — and the whole suite is also exposed as an **MCP server**, drivabl
 | Run state persisted per iteration, resumable after a crash       | ✅     |
 | Human-in-the-loop: approve / reject endpoints                    | ✅     |
 | Trajectory eval suite, including adversarial scenarios           | ✅     |
-| State-graph execution with checkpoints and step streaming        | ⬜     |
+| State-graph execution with checkpoints and step streaming        | ✅     |
 | MCP server exposing the suite → **v1**                           | ⬜     |
 
 ## Stack
@@ -51,6 +51,38 @@ POST /v1/runs/{id}/approve        → status: answered
 
 The run is written to Postgres after every iteration, so the wait for a human costs an open
 connection to nobody. Between the two requests the process can restart.
+
+`POST /v1/runs/stream` returns the same run as server-sent events — one per token, plus one when
+each tool starts and ends, so the customer sees "looking up your order" instead of a spinner.
+
+## Two engines
+
+The agent exists twice: a hand-written loop (`agent/loop.py`) and a LangGraph state machine
+(`graph.py`), selected per request with `?engine=native|graph`. Both are scored by the same thirty
+scenarios — a migration validated by a different eval is validated by nothing.
+
+```mermaid
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	agent(agent)
+	act(act)
+	approval(approval)
+	wrap_up(wrap_up)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> agent;
+	act -.-> __end__;
+	act -.-> agent;
+	act -.-> approval;
+	act -.-> wrap_up;
+	agent -.-> __end__;
+	agent -.-> act;
+	approval -.-> agent;
+	approval -.-> wrap_up;
+	wrap_up --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+```
 
 ## Design principles
 
@@ -111,12 +143,56 @@ the two paraphrases written to reproduce the failure **both passed v1** — an i
 be one the rubric already handles. The real answers, pasted in verbatim, reproduced it. The
 calibration set now holds them, and both rubric versions stay in `judge.py` with their scores.
 
+### Hand-written loop vs LangGraph
+
+Both engines, same thirty scenarios, same thresholds, two runs in flight at a time so the numbers
+are comparable:
+
+| Engine                | Ordinary | Adversarial | median | p95     | iterations | cost / 30 runs |
+| --------------------- | -------- | ----------- | ------ | ------- | ---------- | -------------- |
+| hand-written          | 20/20    | 10/10       | 6.69 s | 10.68 s | 1.93       | $0.42          |
+| LangGraph             | 20/20    | 10/10       | 7.35 s | 12.37 s | 1.93       | $0.38          |
+
+**29 of 30 runs took the identical tool path.** The one that differed (`already-refunded`:
+escalate vs. answer) also differs between two runs of the *same* engine — it is the model, not the
+framework.
+
+**What the framework gave.** Three things, and only one of them is large. `interrupt()` turns
+human-in-the-loop into a function call that returns the human's answer: the hand-written engine
+needed a second entry point, a serialiser and a table to reach the same place. `astream_events`
+publishes every node and tool transition for free, which is the difference between a customer
+watching a spinner for eight seconds and watching progress. `draw_mermaid()` produces the diagram
+above from the code, so it cannot drift.
+
+**What it cost.** A second Postgres driver — the checkpointer speaks psycopg while the rest of the
+service speaks asyncpg — so one process now holds two connection pools to one database. Correct
+behaviour also moved into constructor keywords: `ToolNode`'s default is to re-raise, so the first
+graph run died on the scenario where the order service fails, a bug the hand-written engine cannot
+have because its errors are caught by construction. The same thing happened again with provider
+failures, which escape the graph as tracebacks until a node catches them. Neither is hard to fix;
+both are invisible until traffic finds them, which is a different property from code that reads
+wrong on the page.
+
+**And what it did not give.** The checkpointer is not a substitute for the `runs` table. It stores
+opaque blobs keyed by thread id, and "which runs are waiting for a human" is a business question —
+so both engines still write a row, and the graph engine keeps its checkpoint on top. The module
+this work follows suggests deleting the hand-rolled persistence once the checkpointer is in; that
+would have deleted the approval queue with it.
+
+**Verdict: worth it here, unlike LCEL in the sibling project.** The deciding feature is
+`interrupt()`: human-in-the-loop is this product's core, and the framework does it better than the
+code it replaces. Streaming step events is a real second reason. Had the agent been a straight
+loop with no human in the middle, the answer would have been the same as DocPilot's — the
+abstraction would have replaced working, inspectable code with an equivalent that is harder to
+read. Both engines stay in the repository, and the evals decide, not the enthusiasm.
+
 ## Layout
 
 ```
 src/agentdesk/
   agent/         loop, budgets, state, prompts, tool registry
   routes/        POST /runs, GET /runs/{id}, approve, reject
+  graph.py       the same agent as a LangGraph state machine
   judge.py       the one judged question, with its superseded rubric
   trajectory.py  scoring a run against what it was supposed to do
   db.py          one table; the transcript is jsonb, the counters are columns
@@ -124,6 +200,6 @@ evals/
   data/          30 scenarios, 12 judge calibration cases
   test_trajectories.py   the CI gate (thresholds at the measured lower bound)
 scripts/
-  measure_trajectories.py   the full suite, with --control for the weak-prompt run
+  measure_trajectories.py   the full suite; --engine graph, --control for the weak prompt
   calibrate_judge.py        both rubrics over the same labelled replies
 ```
