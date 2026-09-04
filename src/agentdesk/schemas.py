@@ -1,12 +1,15 @@
-"""Pydantic models for AgentDesk.
+"""The shapes that cross a boundary: the API's requests and responses, and the run itself.
 
-Budgets and run status are the agent's two structural guardrails: a Pydantic cap and a state
-machine cannot be talked around by a prompt.
+Two of them are guardrails rather than data. `Budgets` bounds what a run may spend, and
+`RunStatus` is a closed set — an agent that can only ever be in one of six states is an agent
+whose behaviour can be enumerated, which is what makes a trajectory eval possible at all.
 """
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from agentdesk.config import settings
 
 type RunStatus = Literal[
     "running",
@@ -17,31 +20,50 @@ type RunStatus = Literal[
     "failed",
 ]
 
+# Statuses from which nothing further happens on its own. `awaiting_approval` is deliberately
+# absent: a suspended run is not finished, it is waiting for a person.
+TERMINAL: frozenset[str] = frozenset({"answered", "escalated", "budget_exceeded", "failed"})
+
 
 class Budgets(BaseModel):
-    """Four counters, checked BEFORE every iteration.
+    """Four ceilings, checked before every iteration.
 
-    On overrun the agent does not raise: it wraps up cleanly and the status is recorded.
+    Defaults come from configuration so a deployment can tighten them without a release, and a
+    caller may override them per run — a batch job and a live chat do not deserve the same
+    patience.
     """
 
-    max_iterations: int = 10
-    max_tokens_total: int = 50_000
-    max_cost_eur: float = 0.50
-    max_wall_seconds: float = 120.0
+    max_iterations: int = Field(default_factory=lambda: settings.max_iterations, gt=0)
+    max_tokens_total: int = Field(default_factory=lambda: settings.max_tokens_total, gt=0)
+    max_cost_usd: float = Field(default_factory=lambda: settings.max_cost_usd, gt=0)
+    max_wall_seconds: float = Field(default_factory=lambda: settings.max_wall_seconds, gt=0)
 
 
-class ProposeRefund(BaseModel):
-    """Propose a refund. Does NOT execute it: creates a request awaiting human approval."""
-
-    order_id: str
-    amount_eur: float = Field(le=500, gt=0, description="Hard cap: 500 EUR")
-    reason: str
+class RunRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    customer_email: str = Field(default="", max_length=200)
+    budgets: Budgets = Field(default_factory=Budgets)
 
 
-class Run(BaseModel):
-    """An agent run, persisted at every iteration (no persistence, no human-in-the-loop)."""
+class Approval(BaseModel):
+    """A human's verdict on a suspended run."""
+
+    note: str = Field(default="", max_length=500)
+
+
+class RunView(BaseModel):
+    """A run as the API returns it.
+
+    `pending_action` is the whole point of the shape: when a run is suspended, the caller is
+    shown exactly what it would be approving, not a run id and a status to go look up.
+    """
 
     id: str
-    status: RunStatus = "running"
+    status: RunStatus
+    answer: str | None = None
+    pending_action: dict[str, Any] | None = None
+    stop_reason: str = ""
     iterations: int = 0
-    cost_eur: float = 0.0
+    tokens: int = 0
+    cost_usd: float = 0.0
+    cost_is_partial: bool = False
