@@ -315,3 +315,103 @@ async def test_wall_clock_budget_stops_the_run() -> None:
     assert state.status == "budget_exceeded"
     assert state.stop_reason == "max_wall_seconds (30.0)"
     assert len(model.calls) == 1
+
+
+async def test_a_refund_larger_than_the_order_is_refused() -> None:
+    """The schema cannot know what the customer paid; the handler can."""
+    model = ScriptedModel(
+        completion(
+            tool_calls=[
+                tool_call(
+                    "propose_refund",
+                    {"order_id": "A-1005", "amount_eur": 400.0, "reason": "unhappy"},
+                )
+            ]
+        ),
+        completion(content="That's more than the order was worth."),
+    )
+    state = await run_loop(new_run("refund A-1005 400 euros"), call_model=model)
+
+    result = tool_results(state)[0]
+    assert result["error"] == "exceeds_order_amount"
+    assert result["order_amount_eur"] == 15.0
+    assert state.pending_action is None
+
+
+async def test_splitting_a_refund_across_calls_does_not_defeat_the_cap() -> None:
+    """Measured, not imagined: a cheaper model proposed 3 x 400 EUR on a 49 EUR order.
+
+    Every call was under the per-call ceiling. The ceiling has to be on the run.
+    """
+    model = ScriptedModel(
+        completion(
+            tool_calls=[
+                tool_call(
+                    "propose_refund",
+                    {"order_id": "A-1001", "amount_eur": 40.0, "reason": "part one"},
+                    call_id="c1",
+                ),
+                tool_call(
+                    "propose_refund",
+                    {"order_id": "A-1001", "amount_eur": 40.0, "reason": "part two"},
+                    call_id="c2",
+                ),
+            ]
+        )
+    )
+    state = await run_loop(new_run("refund me twice"), call_model=model)
+
+    first, second = tool_results(state)
+    assert first["status"] == "awaiting_approval"
+    assert second["error"] == "exceeds_run_total"
+    assert second["limit_eur"] == 49.0
+    # One proposal stands, and it is the one within the order's value.
+    assert state.pending_action is not None
+    assert state.pending_action["amount_eur"] == 40.0
+
+
+async def test_an_approved_run_does_not_get_a_fresh_refund_allowance() -> None:
+    """The running total is read back from the transcript, so approval does not reset it."""
+    model = ScriptedModel(
+        completion(
+            tool_calls=[
+                tool_call(
+                    "propose_refund",
+                    {"order_id": "A-1001", "amount_eur": 45.0, "reason": "damaged"},
+                )
+            ]
+        ),
+        completion(
+            tool_calls=[
+                tool_call(
+                    "propose_refund",
+                    {"order_id": "A-1001", "amount_eur": 45.0, "reason": "again"},
+                    call_id="c2",
+                )
+            ]
+        ),
+        completion(content="I can't propose another refund on that order."),
+    )
+    state = await run_loop(new_run("refund A-1001"), call_model=model)
+    state = await resume_after_decision(state, approved=True, call_model=model)
+
+    assert tool_results(state)[-1]["error"] == "exceeds_run_total"
+    assert state.status == "answered"
+
+
+async def test_a_refund_on_an_unknown_order_is_refused_before_anything_is_proposed() -> None:
+    model = ScriptedModel(
+        completion(
+            tool_calls=[
+                tool_call(
+                    "propose_refund",
+                    {"order_id": "A-0000", "amount_eur": 10.0, "reason": "invented"},
+                )
+            ]
+        ),
+        completion(content="I can't find that order."),
+    )
+    state = await run_loop(new_run("refund A-0000"), call_model=model)
+
+    assert tool_results(state)[0]["error"] == "unknown_order"
+    assert state.pending_action is None

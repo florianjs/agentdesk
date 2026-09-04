@@ -19,12 +19,17 @@ from agentdesk.llm.client import ModelTier, resolve_model, with_cost_accounting
 from agentdesk.llm.retry import RETRYABLE, with_retry
 
 
-def model_call(client: AsyncOpenAI, *, tier: ModelTier = "smart") -> ModelCall:
+def model_call(client: AsyncOpenAI, *, tier: ModelTier = "smart", model: str = "") -> ModelCall:
     """Build the callable the loop drives.
 
     Temperature 0: the agent's job is to follow a policy, and a policy applied differently to the
     same facts is a bug even when both answers read well.
+
+    `model` names one directly, bypassing the tier. Callers in the service always name a tier;
+    only the model comparison names a model, because that is the one place the point is to run
+    something the configuration does not select.
     """
+    primary = model or resolve_model(tier)
 
     async def call(messages: list[dict[str, Any]], schemas: list[dict[str, Any]]) -> Any:
         async def attempt(model: str) -> Any:
@@ -41,7 +46,7 @@ def model_call(client: AsyncOpenAI, *, tier: ModelTier = "smart") -> ModelCall:
 
         try:
             return await with_retry(
-                lambda: attempt(resolve_model(tier)),
+                lambda: attempt(primary),
                 max_attempts=settings.retry_max_attempts,
                 base_delay_s=settings.retry_base_delay_s,
             )

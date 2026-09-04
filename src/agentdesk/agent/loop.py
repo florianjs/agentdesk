@@ -25,7 +25,13 @@ from typing import Any
 from agentdesk.agent.budgets import BudgetLedger
 from agentdesk.agent.prompts import CURRENT
 from agentdesk.agent.state import AgentState
-from agentdesk.agent.tools import REQUIRES_APPROVAL, ToolContext, execute_tool, tool_schemas
+from agentdesk.agent.tools import (
+    REQUIRES_APPROVAL,
+    ToolContext,
+    execute_tool,
+    proposed_total,
+    tool_schemas,
+)
 from agentdesk.llm.client import read_usage
 from agentdesk.llm.tools import raise_if_upstream_error
 from agentdesk.schemas import Budgets
@@ -135,6 +141,9 @@ async def run_loop(
         # so suspending mid-batch would leave a run that can never be resumed.
         suspend_on: dict[str, Any] | None = None
         escalated = False
+        # Re-read from the transcript before each batch: a resumed run must not get a fresh
+        # refund allowance because a human approved the last one.
+        context.proposed_eur = proposed_total(state.messages)
 
         for call in calls:
             name = call.function.name

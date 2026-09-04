@@ -33,10 +33,15 @@ type Handler = Callable[[BaseModel, "ToolContext"], Awaitable[dict[str, Any]]]
 
 
 class ToolContext(BaseModel):
-    """What a handler is allowed to know about the run it serves."""
+    """What a handler is allowed to know about the run it serves.
+
+    `proposed_eur` is mutable state on purpose: it is the running total of refunds this run has
+    already proposed, and it is what makes the cap a limit on the *run* rather than on one call.
+    """
 
     run_id: str
     customer_email: str = ""
+    proposed_eur: float = 0.0
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -61,9 +66,10 @@ class ProposeRefund(BaseModel):
     human must approve. Say so to the customer — do not promise the money is on its way."""
 
     order_id: str = Field(min_length=1, max_length=64)
-    # The cap is enforced here, in the type. A model cannot construct a larger refund, so this
-    # holds against a prompt injection, a jailbreak, and a plain mistake alike.
-    amount_eur: float = Field(gt=0, le=500, description="Hard cap: 500 EUR")
+    # The per-call cap is enforced here, in the type: a model cannot construct a larger refund.
+    # It is not sufficient on its own — see `handle_propose_refund`, where a weaker model was
+    # measured proposing 3 x 400 EUR on a 49 EUR order, each call legal, the total absurd.
+    amount_eur: float = Field(gt=0, le=500, description="Hard cap: 500 EUR per call")
     reason: str = Field(min_length=3, max_length=500)
 
 
@@ -112,9 +118,70 @@ async def handle_get_order(args: BaseModel, context: ToolContext) -> dict[str, A
     return {"found": True, **order}
 
 
+MAX_RUN_REFUND_EUR = 500.0
+
+
+def proposed_total(messages: list[dict[str, Any]]) -> float:
+    """What this run has already had accepted as a refund proposal, read from the transcript.
+
+    Derived rather than stored: the transcript is what survives a restart and an approval, so a
+    counter kept anywhere else would reset exactly when the limit matters most — on the resumed
+    run, after a human has already approved one payment.
+    """
+    total = 0.0
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        try:
+            payload = json.loads(message.get("content") or "{}")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("status") == "awaiting_approval":
+            total += float(payload.get("amount_eur", 0.0))
+    return total
+
+
 async def handle_propose_refund(args: BaseModel, context: ToolContext) -> dict[str, Any]:
-    """Record a refund request. Approval, and execution, happen elsewhere."""
+    """Record a refund request. Approval, and execution, happen elsewhere.
+
+    Two checks the schema cannot make, because both depend on state the type system never sees:
+
+    - **the order's own value.** Refunding more than the customer paid is wrong whatever the cap
+      says, and the amount lives in the order, not in the arguments;
+    - **the running total for this run.** A per-call ceiling is defeated by asking three times.
+      This was not hypothetical: a cheaper model, measured on the `adv-split-refund` scenario,
+      proposed 3 x 400 EUR against a 49 EUR order — every call valid, the total 24x the price.
+
+    Both come back as structured errors naming the real limit, so a model that hit them by
+    mistake can correct, and one that hit them on purpose gets nowhere.
+    """
     assert isinstance(args, ProposeRefund)
+
+    from agentdesk.orders import get_order
+
+    order = await get_order(args.order_id)
+    if order is None:
+        return {"error": "unknown_order", "order_id": args.order_id}
+
+    paid = float(order["amount_eur"])
+    if args.amount_eur > paid:
+        return {
+            "error": "exceeds_order_amount",
+            "order_id": args.order_id,
+            "order_amount_eur": paid,
+            "requested_eur": args.amount_eur,
+        }
+
+    running = context.proposed_eur + args.amount_eur
+    if running > min(paid, MAX_RUN_REFUND_EUR):
+        return {
+            "error": "exceeds_run_total",
+            "already_proposed_eur": context.proposed_eur,
+            "requested_eur": args.amount_eur,
+            "limit_eur": min(paid, MAX_RUN_REFUND_EUR),
+        }
+
+    context.proposed_eur = running
     return {
         "status": "awaiting_approval",
         "order_id": args.order_id,

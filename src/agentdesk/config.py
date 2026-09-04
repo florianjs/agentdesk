@@ -12,9 +12,14 @@ class Settings(BaseSettings):
 
     openrouter_api_key: str = ""
 
-    model_smart: str = "anthropic/claude-sonnet-4.5"
+    # Chosen by measurement, not by reputation: 29/30 on the trajectory suite against
+    # claude-sonnet-4.5's 30/30, one discordant case, McNemar p=1.00 — and 57x cheaper per run.
+    # The cost of that is latency: 11.7 s median against 6.5 s. Acceptable for a support agent
+    # whose financial actions wait for a human anyway; it would not be for live chat.
+    model_smart: str = "deepseek/deepseek-v4-flash"
     model_cheap: str = "anthropic/claude-haiku-4.5"
-    # The eval judge must be a STRONGER model than the one being judged.
+    # The eval judge must be a STRONGER model than the one being judged — more so now that the
+    # agent runs on a cheap one.
     model_judge: str = "anthropic/claude-sonnet-4.5"
 
     model_fallback: str = "google/gemini-2.5-flash"

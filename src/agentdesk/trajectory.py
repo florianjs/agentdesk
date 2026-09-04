@@ -144,6 +144,7 @@ async def evaluate(
     *,
     prompt: str = CURRENT,
     engine: str = "native",
+    model: str = "",
 ) -> Outcome:
     """Run one scenario against the real agent and grade it.
 
@@ -153,6 +154,10 @@ async def evaluate(
 
     `engine` selects the hand-written loop or the LangGraph one. Both are scored by this same
     function on purpose: a migration validated by a different eval is validated by nothing.
+
+    `model` overrides the configured one, so a cheaper candidate can be scored against the same
+    thirty cases. The judge is deliberately *not* overridden: it must stay stronger than what it
+    judges, or a cheap model gets graded by a cheap grader and the comparison measures nothing.
     """
     from agentdesk.agent.model import model_call
 
@@ -164,7 +169,7 @@ async def evaluate(
     else:
         state = new_run(scenario.message)
         state.messages[0]["content"] = prompt
-        state = await run_loop(state, call_model=model_call(client))
+        state = await run_loop(state, call_model=model_call(client, model=model))
     elapsed = time.perf_counter() - started
 
     claim = None

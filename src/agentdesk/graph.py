@@ -44,7 +44,7 @@ from agentdesk.agent.budgets import BudgetLedger
 from agentdesk.agent.loop import HANDOVER
 from agentdesk.agent.prompts import CURRENT
 from agentdesk.agent.state import AgentState
-from agentdesk.agent.tools import REGISTRY, REQUIRES_APPROVAL, ToolContext
+from agentdesk.agent.tools import REGISTRY, REQUIRES_APPROVAL, ToolContext, proposed_total
 from agentdesk.config import settings
 from agentdesk.llm.client import BASE_URL, DEFAULT_TIMEOUT_S
 from agentdesk.schemas import Budgets
@@ -225,6 +225,10 @@ def build_graph(
         Every tool in the batch runs before anything suspends — a transcript holding a tool call
         without its result is rejected by the provider on the next request.
         """
+        # Same rule as the hand-written engine: the running refund total comes from the
+        # transcript, so it survives an approval and a restart.
+        context.proposed_eur = proposed_total([to_plain(m) for m in state["messages"]])
+
         # `handle_tool_errors` is not optional here: the default re-raises, which ends the run
         # on any tool failure. The hand-written engine cannot have that bug — its errors are
         # caught inside `execute_tool` by construction — while here correct behaviour is a

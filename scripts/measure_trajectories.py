@@ -22,13 +22,24 @@ import statistics
 from typing import Any
 
 from agentdesk.agent.prompts import CONTROL_WEAK, CURRENT
+from agentdesk.config import settings
 from agentdesk.llm.client import close_client, get_client
 from agentdesk.metrics import Proportion
 from agentdesk.trajectory import Outcome, Scenario, evaluate
 
 SCENARIOS = pathlib.Path("evals/data/scenarios.jsonl")
-RESULTS = pathlib.Path("evals/results/trajectories.json")
-RESULTS_GRAPH = pathlib.Path("evals/results/trajectories-graph.json")
+RESULTS_DIR = pathlib.Path("evals/results")
+
+
+def results_path(engine: str, model: str) -> pathlib.Path:
+    """One file per configuration, named after it: a comparison needs its artefacts side by side."""
+    parts = ["trajectories"]
+    if engine != "native":
+        parts.append(engine)
+    if model:
+        parts.append(model.replace("/", "-"))
+    return RESULTS_DIR / ("-".join(parts) + ".json")
+
 
 # Four at a time. Higher and the rate limiter, not the agent, decides what the latency numbers
 # say — and OpenRouter caps in-flight spend per account, which surfaces as a 402 mid-suite
@@ -46,9 +57,11 @@ def load(kind: str | None, only: str | None) -> list[Scenario]:
     return scenarios
 
 
-async def run_one(scenario: Scenario, gate: asyncio.Semaphore, prompt: str, engine: str) -> Outcome:
+async def run_one(
+    scenario: Scenario, gate: asyncio.Semaphore, prompt: str, engine: str, model: str
+) -> Outcome:
     async with gate:
-        return await evaluate(scenario, get_client(), prompt=prompt, engine=engine)
+        return await evaluate(scenario, get_client(), prompt=prompt, engine=engine, model=model)
 
 
 def report(results: list[Outcome]) -> dict[str, Any]:
@@ -100,18 +113,19 @@ def report(results: list[Outcome]) -> dict[str, Any]:
     return summary
 
 
-def write_results(summary: dict[str, Any], results: list[Outcome], engine: str) -> None:
+def write_results(summary: dict[str, Any], results: list[Outcome], engine: str, model: str) -> None:
     """The full transcript of every run, kept as an artefact.
 
     A score with no runs behind it cannot be argued with — and the answers are where the next
     prompt change starts.
     """
-    path = RESULTS_GRAPH if engine == "graph" else RESULTS
+    path = results_path(engine, model)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
                 "engine": engine,
+                "model": model or settings.model_smart,
                 "summary": summary,
                 "runs": [
                     {
@@ -141,11 +155,12 @@ async def main(
     control: bool,
     engine: str,
     concurrency: int,
+    model: str,
 ) -> None:
     scenarios = load(kind, only)
     prompt = CONTROL_WEAK if control else CURRENT
     print(
-        f"{len(scenarios)} scenarios"
+        f"{len(scenarios)} scenarios · {engine} engine · {model or settings.model_smart}"
         + (" — NEGATIVE CONTROL, weak prompt" if control else "")
         + "\n"
     )
@@ -153,7 +168,7 @@ async def main(
     gate = asyncio.Semaphore(concurrency)
     try:
         results = await asyncio.gather(
-            *(run_one(scenario, gate, prompt, engine) for scenario in scenarios)
+            *(run_one(scenario, gate, prompt, engine, model) for scenario in scenarios)
         )
     finally:
         await close_client()
@@ -161,7 +176,7 @@ async def main(
     summary = report(list(results))
 
     if save:
-        write_results(summary, list(results), engine)
+        write_results(summary, list(results), engine, model)
 
 
 if __name__ == "__main__":
@@ -175,6 +190,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--concurrency", type=int, default=CONCURRENCY, help="runs in flight at once"
     )
+    parser.add_argument("--model", default="", help="score a model other than the configured one")
     parser.add_argument(
         "--control",
         action="store_true",
@@ -189,5 +205,6 @@ if __name__ == "__main__":
             arguments.control,
             arguments.engine,
             arguments.concurrency,
+            arguments.model,
         )
     )
