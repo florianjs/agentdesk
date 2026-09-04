@@ -9,7 +9,7 @@ knowledge) — and the whole suite is also exposed as an **MCP server**, drivabl
 
 ## Status
 
-🔧 In progress — v1 ships when the MCP server lands.
+**v1.** The trajectory evals are green in CI and the suite is exposed over MCP.
 
 | Area                                                             | Status |
 | ---------------------------------------------------------------- | ------ |
@@ -20,7 +20,7 @@ knowledge) — and the whole suite is also exposed as an **MCP server**, drivabl
 | Human-in-the-loop: approve / reject endpoints                    | ✅     |
 | Trajectory eval suite, including adversarial scenarios           | ✅     |
 | State-graph execution with checkpoints and step streaming        | ✅     |
-| MCP server exposing the suite → **v1**                           | ⬜     |
+| MCP server exposing the suite → **v1**                           | ✅     |
 
 ## Stack
 
@@ -186,6 +186,45 @@ loop with no human in the middle, the answer would have been the same as DocPilo
 abstraction would have replaced working, inspectable code with an equivalent that is harder to
 read. Both engines stay in the repository, and the evals decide, not the enthusiasm.
 
+## MCP server
+
+The three services are exposed as one MCP server, so any MCP client — Claude Code, Claude
+Desktop, another agent — can triage a ticket, search the docs, or hand a whole ticket to the
+agent.
+
+```bash
+uv run mcp dev src/agentdesk/mcp_server.py        # the official inspector
+claude mcp add supportly -- uv run --directory /path/to/agentdesk python -m agentdesk.mcp_server
+```
+
+| Surface                                    | What it does                                        |
+| ------------------------------------------ | --------------------------------------------------- |
+| `classify_ticket(subject, body)`           | → Triagely: category, urgency, sentiment, language   |
+| `search_product_docs(query, collection)`   | → DocPilot: five passages with sources and scores    |
+| `start_support_run(subject, body)`         | → the agent: answers, escalates, or proposes         |
+| `supportly://runs/{run_id}` *(resource)*   | status and transcript of one run                     |
+
+**There is deliberately no `approve_run` tool.** A run that proposes a refund comes back as
+`awaiting_approval` with the amount attached, and the only way to approve it is a human on
+`POST /v1/runs/{id}/approve`. A client that could approve its own proposals would be an agent
+holding its own rubber stamp — and a client's guardrails are not this server's to trust. A test
+asserts the tool list stays that way.
+
+The suspension survives the process, too: a run started inside the MCP server and approved later
+through the HTTP API resumes from its Postgres checkpoint, in a different process entirely.
+
+Remote deployments use the streamable-HTTP transport behind a shared key — a remote MCP server is
+a public API whatever the protocol calls it, and serving it without `MCP_API_KEY` is refused at
+startup:
+
+```bash
+uv run python -m agentdesk.mcp_server --http --port 8003
+claude mcp add supportly --transport http http://localhost:8003/mcp --header "X-API-Key: $MCP_API_KEY"
+```
+
+Output is kept small on purpose: five hits, 400-character excerpts, transcripts without the
+system prompt. Everything returned here is spent from the client's context on every later turn.
+
 ## Layout
 
 ```
@@ -193,6 +232,7 @@ src/agentdesk/
   agent/         loop, budgets, state, prompts, tool registry
   routes/        POST /runs, GET /runs/{id}, approve, reject
   graph.py       the same agent as a LangGraph state machine
+  mcp_server.py  three tools and one resource; no way to approve anything
   judge.py       the one judged question, with its superseded rubric
   trajectory.py  scoring a run against what it was supposed to do
   db.py          one table; the transcript is jsonb, the counters are columns

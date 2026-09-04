@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     # into returning nothing at all rather than into being brief.
     judge_max_tokens: int = 2000
 
+    # Shared key for the MCP server's remote transport. Empty means stdio only, which is the
+    # safe default: a local server reachable by one client needs no key, a remote one does.
+    mcp_api_key: str = ""
+
     # Braintrust (optional) — versioned trajectory-eval scores.
     braintrust_api_key: str = ""
     braintrust_api_url: str = "https://api.braintrust.dev"
